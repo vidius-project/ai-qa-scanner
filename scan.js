@@ -56,134 +56,143 @@ function sameDomain(a, b) {
   catch { return false; }
 }
 
-async function scanPage(context, url) {
+async function scanPage(context, url, reportDir, pageIndex) {
   const findings = [];
   const consoleErrors = [];
   const failedRequests = [];
   const page = await context.newPage();
-
-  page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
-  page.on('requestfailed', req => failedRequests.push({ url: req.url(), failure: req.failure()?.errorText || 'bilinmiyor' }));
-
-  const imageResponses = [];
-  page.on('response', async (res) => {
-    try {
-      const req = res.request();
-      if (req.resourceType() !== 'image') return;
-      const headers = res.headers();
-      let size = headers['content-length'] ? parseInt(headers['content-length'], 10) : null;
-      if (size === null) {
-        // content-length yoksa (ör. chunked/compressed), gövdeyi ölçmeyi dene
-        const body = await res.body().catch(() => null);
-        size = body ? body.length : null;
-      }
-      if (size !== null) imageResponses.push({ url: req.url(), size });
-    } catch { /* bazı response'lar body okumaya kapalı olabilir, sessizce geç */ }
-  });
-
-  const startTime = Date.now();
-  let response;
   try {
-    response = await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
-  } catch (e) {
-    findings.push({ severity: 'high', category: 'Erişim', text: `Sayfa yüklenemedi: ${e.message}` });
-    await page.close();
-    return { url, findings, loadTimeMs: null, links: [], screenshots: {} };
-  }
-  const loadTimeMs = Date.now() - startTime;
 
-  const headers = response.headers();
-  if (!url.startsWith('https://')) findings.push({ severity: 'high', category: 'Güvenlik', text: 'Sayfa HTTPS kullanmıyor.' });
-  const secHeaders = ['strict-transport-security', 'x-content-type-options', 'x-frame-options', 'content-security-policy'];
-  const missingHeaders = secHeaders.filter(h => !headers[h]);
-  if (missingHeaders.length) findings.push({ severity: 'medium', category: 'Güvenlik', text: `Eksik güvenlik header'ları: ${missingHeaders.join(', ')}` });
+    page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.text()); });
+    page.on('requestfailed', req => failedRequests.push({ url: req.url(), failure: req.failure()?.errorText || 'bilinmiyor' }));
 
-  if (consoleErrors.length) findings.push({ severity: 'high', category: 'JS Hataları', text: `${consoleErrors.length} konsol hatası.`, detail: consoleErrors.slice(0, 8) });
-  if (failedRequests.length) findings.push({ severity: 'high', category: 'Kırık Kaynaklar', text: `${failedRequests.length} kaynak yüklenemedi.`, detail: failedRequests.slice(0, 8).map(f => `${f.url} — ${f.failure}`) });
-
-  if (loadTimeMs > 5000) findings.push({ severity: 'medium', category: 'Performans', text: `Sayfa yüklenmesi ${(loadTimeMs / 1000).toFixed(1)} saniye sürdü (5sn üzeri yavaş kabul edilir).` });
-
-  // Optimize edilmemiş görseller
-  const bigImages = imageResponses
-    .filter(img => img.size >= IMAGE_SIZE_THRESHOLDS.medium)
-    .sort((a, b) => b.size - a.size);
-  const highImages = bigImages.filter(img => img.size >= IMAGE_SIZE_THRESHOLDS.high);
-  const mediumImages = bigImages.filter(img => img.size < IMAGE_SIZE_THRESHOLDS.high);
-  if (highImages.length) {
-    findings.push({
-      severity: 'high',
-      category: 'Görsel Optimizasyonu',
-      text: `${highImages.length} görsel 1MB üzerinde — sayfa hızını doğrudan etkiliyor.`,
-      detail: highImages.slice(0, 8).map(img => `${fmtBytes(img.size)} — ${img.url}`),
+    const imageResponses = [];
+    page.on('response', res => {
+      try {
+        const req = res.request();
+        if (req.resourceType() !== 'image') return;
+        const headers = res.headers();
+        // Boyut bilinmiyorsa gövdeyi Node belleğine kopyalamadan atla.
+        const size = Number(headers['content-length']);
+        if (Number.isFinite(size) && size >= IMAGE_SIZE_THRESHOLDS.medium) {
+          imageResponses.push({ url: req.url(), size });
+        }
+      } catch { /* bazı response'lar body okumaya kapalı olabilir, sessizce geç */ }
     });
-  }
-  if (mediumImages.length) {
-    findings.push({
-      severity: 'medium',
-      category: 'Görsel Optimizasyonu',
-      text: `${mediumImages.length} görsel 300KB-1MB arası — sıkıştırılabilir.`,
-      detail: mediumImages.slice(0, 8).map(img => `${fmtBytes(img.size)} — ${img.url}`),
-    });
-  }
 
-  const title = await page.title();
-  const metaDesc = await page.$eval('meta[name="description"]', el => el.content).catch(() => null);
-  const canonical = await page.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
-  const h1Count = await page.$$eval('h1', els => els.length).catch(() => 0);
-  if (!title) findings.push({ severity: 'medium', category: 'SEO', text: 'Title etiketi boş/yok.' });
-  if (!metaDesc) findings.push({ severity: 'low', category: 'SEO', text: 'Meta description yok.' });
-  if (!canonical) findings.push({ severity: 'low', category: 'SEO', text: 'Canonical tag yok.' });
-  if (h1Count === 0) findings.push({ severity: 'medium', category: 'SEO', text: 'Sayfada H1 etiketi yok.' });
-  if (h1Count > 1) findings.push({ severity: 'low', category: 'SEO', text: `Sayfada ${h1Count} adet H1 var (idealde 1 tane olmalı).` });
-
-  const imgsMissingAlt = await page.$$eval('img', imgs => imgs.filter(i => !i.alt || i.alt.trim() === '').length);
-  if (imgsMissingAlt > 0) findings.push({ severity: 'medium', category: 'Erişilebilirlik', text: `${imgsMissingAlt} görselde alt metni eksik.` });
-
-  const inputsMissingLabel = await page.$$eval('input:not([type=hidden])', inputs =>
-    inputs.filter(i => !i.getAttribute('aria-label') && !(i.id && document.querySelector(`label[for="${i.id}"]`)) && !i.closest('label')).length
-  ).catch(() => 0);
-  if (inputsMissingLabel > 0) findings.push({ severity: 'medium', category: 'Erişilebilirlik', text: `${inputsMissingLabel} form alanında label eksik.` });
-
-  await page.setViewportSize({ width: 375, height: 812 });
-  await page.waitForTimeout(400);
-  const hasOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 5);
-  if (hasOverflow) findings.push({ severity: 'medium', category: 'Mobil/Responsive', text: 'Mobilde (375px) yatay taşma var.' });
-  const mobileShot = await page.screenshot({ fullPage: false }).catch(() => null);
-
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await page.waitForTimeout(300);
-  const desktopShot = await page.screenshot({ fullPage: false }).catch(() => null);
-
-  const formResults = await page.$$eval('form', forms =>
-    forms.map(f => {
-      const requiredFields = f.querySelectorAll('[required]').length;
-      const submitBtn = f.querySelector('button[type=submit], input[type=submit], button:not([type])');
-      let validationTriggered = null;
-      if (requiredFields > 0 && submitBtn) {
-        submitBtn.click();
-        validationTriggered = !f.checkValidity();
-      }
-      return { requiredFields, hasSubmitButton: !!submitBtn, validationTriggered };
-    })
-  ).catch(() => []);
-  formResults.forEach((f, i) => {
-    if (f.requiredFields > 0 && f.validationTriggered === false) {
-      findings.push({ severity: 'high', category: 'Form Validasyonu', text: `Form #${i + 1}: zorunlu alanlar var ama boş submit engellenmedi.` });
-    } else if (f.requiredFields === 0 && f.hasSubmitButton) {
-      findings.push({ severity: 'low', category: 'Form Validasyonu', text: `Form #${i + 1}: hiçbir alan "required" olarak işaretlenmemiş.` });
+    const startTime = Date.now();
+    let response;
+    try {
+      response = await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
+    } catch (e) {
+      findings.push({ severity: 'high', category: 'Erişim', text: `Sayfa yüklenemedi: ${e.message}` });
+      return { url, findings, loadTimeMs: null, links: [], screenshots: {} };
     }
-  });
+    const loadTimeMs = Date.now() - startTime;
 
-  const html = await page.content();
-  const builderHits = BUILDER_SIGNATURES.filter(sig => sig.pattern.test(html));
-  if (builderHits.length) {
-    findings.push({ severity: 'info', category: 'Olası AI/No-Code Sinyali (KANIT DEĞİL)', text: `İzler bulundu: ${builderHits.map(b => b.name).join(', ')}. Bu kesin kanıt değildir, sadece olasılık belirtir.` });
+    const headers = response.headers();
+    if (!url.startsWith('https://')) findings.push({ severity: 'high', category: 'Güvenlik', text: 'Sayfa HTTPS kullanmıyor.' });
+    const secHeaders = ['strict-transport-security', 'x-content-type-options', 'x-frame-options', 'content-security-policy'];
+    const missingHeaders = secHeaders.filter(h => !headers[h]);
+    if (missingHeaders.length) findings.push({ severity: 'medium', category: 'Güvenlik', text: `Eksik güvenlik header'ları: ${missingHeaders.join(', ')}` });
+
+    if (consoleErrors.length) findings.push({ severity: 'high', category: 'JS Hataları', text: `${consoleErrors.length} konsol hatası.`, detail: consoleErrors.slice(0, 8) });
+    if (failedRequests.length) findings.push({ severity: 'high', category: 'Kırık Kaynaklar', text: `${failedRequests.length} kaynak yüklenemedi.`, detail: failedRequests.slice(0, 8).map(f => `${f.url} — ${f.failure}`) });
+
+    if (loadTimeMs > 5000) findings.push({ severity: 'medium', category: 'Performans', text: `Sayfa yüklenmesi ${(loadTimeMs / 1000).toFixed(1)} saniye sürdü (5sn üzeri yavaş kabul edilir).` });
+
+    // Optimize edilmemiş görseller
+    const bigImages = imageResponses
+      .filter(img => img.size >= IMAGE_SIZE_THRESHOLDS.medium)
+      .sort((a, b) => b.size - a.size);
+    const highImages = bigImages.filter(img => img.size >= IMAGE_SIZE_THRESHOLDS.high);
+    const mediumImages = bigImages.filter(img => img.size < IMAGE_SIZE_THRESHOLDS.high);
+    if (highImages.length) {
+      findings.push({
+        severity: 'high',
+        category: 'Görsel Optimizasyonu',
+        text: `${highImages.length} görsel 1MB üzerinde — sayfa hızını doğrudan etkiliyor.`,
+        detail: highImages.slice(0, 8).map(img => `${fmtBytes(img.size)} — ${img.url}`),
+      });
+    }
+    if (mediumImages.length) {
+      findings.push({
+        severity: 'medium',
+        category: 'Görsel Optimizasyonu',
+        text: `${mediumImages.length} görsel 300KB-1MB arası — sıkıştırılabilir.`,
+        detail: mediumImages.slice(0, 8).map(img => `${fmtBytes(img.size)} — ${img.url}`),
+      });
+    }
+
+    const title = await page.title();
+    const metaDesc = await page.$eval('meta[name="description"]', el => el.content).catch(() => null);
+    const canonical = await page.$eval('link[rel="canonical"]', el => el.href).catch(() => null);
+    const h1Count = await page.$$eval('h1', els => els.length).catch(() => 0);
+    if (!title) findings.push({ severity: 'medium', category: 'SEO', text: 'Title etiketi boş/yok.' });
+    if (!metaDesc) findings.push({ severity: 'low', category: 'SEO', text: 'Meta description yok.' });
+    if (!canonical) findings.push({ severity: 'low', category: 'SEO', text: 'Canonical tag yok.' });
+    if (h1Count === 0) findings.push({ severity: 'medium', category: 'SEO', text: 'Sayfada H1 etiketi yok.' });
+    if (h1Count > 1) findings.push({ severity: 'low', category: 'SEO', text: `Sayfada ${h1Count} adet H1 var (idealde 1 tane olmalı).` });
+
+    const imgsMissingAlt = await page.$$eval('img', imgs => imgs.filter(i => !i.alt || i.alt.trim() === '').length);
+    if (imgsMissingAlt > 0) findings.push({ severity: 'medium', category: 'Erişilebilirlik', text: `${imgsMissingAlt} görselde alt metni eksik.` });
+
+    const inputsMissingLabel = await page.$$eval('input:not([type=hidden])', inputs =>
+      inputs.filter(i => !i.getAttribute('aria-label') && !(i.id && document.querySelector(`label[for="${i.id}"]`)) && !i.closest('label')).length
+    ).catch(() => 0);
+    if (inputsMissingLabel > 0) findings.push({ severity: 'medium', category: 'Erişilebilirlik', text: `${inputsMissingLabel} form alanında label eksik.` });
+
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.waitForTimeout(400);
+    const hasOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 5);
+    if (hasOverflow) findings.push({ severity: 'medium', category: 'Mobil/Responsive', text: 'Mobilde (375px) yatay taşma var.' });
+    const mobileShot = await page.screenshot({
+      path: path.join(reportDir, 'p' + pageIndex + '_mobile.png'), fullPage: false,
+    }).then(() => true).catch(() => false);
+
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.waitForTimeout(300);
+    const desktopShot = await page.screenshot({
+      path: path.join(reportDir, 'p' + pageIndex + '_desktop.png'), fullPage: false,
+    }).then(() => true).catch(() => false);
+
+    const formResults = await page.$$eval('form', forms =>
+      forms.map(f => {
+        const requiredFields = f.querySelectorAll('[required]').length;
+        const submitBtn = f.querySelector('button[type=submit], input[type=submit], button:not([type])');
+        let validationTriggered = null;
+        if (requiredFields > 0 && submitBtn) {
+          submitBtn.click();
+          validationTriggered = !f.checkValidity();
+        }
+        return { requiredFields, hasSubmitButton: !!submitBtn, validationTriggered };
+      })
+    ).catch(() => []);
+    formResults.forEach((f, i) => {
+      if (f.requiredFields > 0 && f.validationTriggered === false) {
+        findings.push({ severity: 'high', category: 'Form Validasyonu', text: `Form #${i + 1}: zorunlu alanlar var ama boş submit engellenmedi.` });
+      } else if (f.requiredFields === 0 && f.hasSubmitButton) {
+        findings.push({ severity: 'low', category: 'Form Validasyonu', text: `Form #${i + 1}: hiçbir alan "required" olarak işaretlenmemiş.` });
+      }
+    });
+
+    // HTML yalnızca renderer içinde geçici tutulur; Node'a sadece eşleşmeler gelir.
+    const builderHits = await page.evaluate(signatures => {
+      const html = document.documentElement.outerHTML;
+      return signatures.filter(sig => new RegExp(sig.source, sig.flags).test(html))
+        .map(sig => ({ name: sig.name }));
+    }, BUILDER_SIGNATURES.map(sig => ({ name: sig.name, source: sig.pattern.source, flags: sig.pattern.flags })));
+    if (builderHits.length) {
+      findings.push({ severity: 'info', category: 'Olası AI/No-Code Sinyali (KANIT DEĞİL)', text: `İzler bulundu: ${builderHits.map(b => b.name).join(', ')}. Bu kesin kanıt değildir, sadece olasılık belirtir.` });
+    }
+
+    const links = await page.$$eval('a[href]', as => Array.from(new Set(as.map(a => a.href))).filter(h => h.startsWith('http')));
+
+    return { url, findings, loadTimeMs, links, screenshots: { desktop: desktopShot, mobile: mobileShot }, builderHits };
+  } finally {
+    // Hata/erken dönüş dahil sayfayı ve taramanın açtığı popup'ları kapat.
+    await Promise.all(context.pages().map(openPage => openPage.close()));
   }
-
-  const links = await page.$$eval('a[href]', as => Array.from(new Set(as.map(a => a.href))).filter(h => h.startsWith('http')));
-
-  await page.close();
-  return { url, findings, loadTimeMs, links, screenshots: { desktop: desktopShot, mobile: mobileShot }, builderHits };
 }
 
 async function checkRobotsAndSitemap(context, baseUrl) {
@@ -191,11 +200,15 @@ async function checkRobotsAndSitemap(context, baseUrl) {
   const origin = new URL(baseUrl).origin;
   try {
     const robots = await context.request.get(`${origin}/robots.txt`, { timeout: 8000 });
-    if (robots.status() >= 400) findings.push({ severity: 'low', category: 'Teknik SEO', text: 'robots.txt bulunamadı.' });
+    try {
+      if (robots.status() >= 400) findings.push({ severity: 'low', category: 'Teknik SEO', text: 'robots.txt bulunamadı.' });
+    } finally { await robots.dispose(); }
   } catch { findings.push({ severity: 'low', category: 'Teknik SEO', text: 'robots.txt kontrol edilemedi.' }); }
   try {
     const sitemap = await context.request.get(`${origin}/sitemap.xml`, { timeout: 8000 });
-    if (sitemap.status() >= 400) findings.push({ severity: 'low', category: 'Teknik SEO', text: 'sitemap.xml bulunamadı.' });
+    try {
+      if (sitemap.status() >= 400) findings.push({ severity: 'low', category: 'Teknik SEO', text: 'sitemap.xml bulunamadı.' });
+    } finally { await sitemap.dispose(); }
   } catch { findings.push({ severity: 'low', category: 'Teknik SEO', text: 'sitemap.xml kontrol edilemedi.' }); }
   return findings;
 }
@@ -203,11 +216,17 @@ async function checkRobotsAndSitemap(context, baseUrl) {
 async function checkBrokenLinks(context, links) {
   const broken = [];
   for (const link of links.slice(0, 30)) {
+    let res;
     try {
-      let res = await context.request.head(link, { timeout: 8000 });
-      if (res.status() === 405) res = await context.request.get(link, { timeout: 8000 });
+      res = await context.request.head(link, { timeout: 8000 });
+      if (res.status() === 405) {
+        await res.dispose();
+        res = await context.request.get(link, { timeout: 8000 });
+      }
+
       if (res.status() >= 400) broken.push({ url: link, status: res.status() });
     } catch { broken.push({ url: link, status: 'zaman aşımı/erişilemedi' }); }
+    finally { if (res) await res.dispose(); }
   }
   return broken;
 }
@@ -219,50 +238,56 @@ function calcScore(allFindings) {
 }
 
 async function run() {
-  const browser = await chromium.launch();
-  const context = await browser.newContext();
-
-  console.log(`Taranıyor: ${targetUrl} (en fazla ${MAX_PAGES} sayfa)`);
-  const visited = new Set();
-  const toVisit = [targetUrl];
-  const pageResults = [];
-
-  while (toVisit.length && pageResults.length < MAX_PAGES) {
-    const url = toVisit.shift();
-    if (visited.has(url)) continue;
-    visited.add(url);
-    console.log(`  → ${url}`);
-    const result = await scanPage(context, url);
-    pageResults.push(result);
-    if (pageResults.length === 1) {
-      const broken = await checkBrokenLinks(context, result.links);
-      if (broken.length) result.findings.push({ severity: 'high', category: 'Kırık Linkler', text: `${broken.length} link hatalı döndü.`, detail: broken.map(b => `${b.url} — ${b.status}`) });
-      const techFindings = await checkRobotsAndSitemap(context, targetUrl);
-      result.findings.push(...techFindings);
-    }
-    result.links.filter(l => sameDomain(l, targetUrl) && !visited.has(l) && !toVisit.includes(l)).forEach(l => toVisit.push(l));
-  }
-
-  await writeReport(targetUrl, pageResults);
-  await browser.close();
-}
-
-async function writeReport(targetUrl, pageResults) {
   const outDir = path.join(__dirname, 'reports');
   const safeName = targetUrl.replace(/https?:\/\//, '').replace(/[^a-z0-9]/gi, '_').slice(0, 50);
   const stamp = Date.now();
   const reportDir = process.env.SCAN_REPORT_DIR || path.join(outDir, `${safeName}_${stamp}`);
   fs.mkdirSync(reportDir, { recursive: true });
+  const browser = await chromium.launch({
+    headless: true,
+    // Tek aktif sayfa; process sınırı Chromium için bir ipucudur, RAM garantisi değil.
+    args: ['--disable-dev-shm-usage', '--disable-background-networking',
+      '--disable-extensions', '--renderer-process-limit=1'],
+  });
+  let context;
+  try {
+    // Oturum/cookie davranışını korumak için tarama boyunca tek context paylaşılır.
+    context = await browser.newContext();
 
+    console.log(`Taranıyor: ${targetUrl} (en fazla ${MAX_PAGES} sayfa)`);
+    const visited = new Set();
+    const toVisit = [targetUrl];
+    const pageResults = [];
+
+    while (toVisit.length && pageResults.length < MAX_PAGES) {
+      const url = toVisit.shift();
+      if (visited.has(url)) continue;
+      visited.add(url);
+      console.log(`  → ${url}`);
+      const result = await scanPage(context, url, reportDir, pageResults.length);
+      pageResults.push(result);
+      if (pageResults.length === 1) {
+        const broken = await checkBrokenLinks(context, result.links);
+        if (broken.length) result.findings.push({ severity: 'high', category: 'Kırık Linkler', text: `${broken.length} link hatalı döndü.`, detail: broken.map(b => `${b.url} — ${b.status}`) });
+        const techFindings = await checkRobotsAndSitemap(context, targetUrl);
+        result.findings.push(...techFindings);
+      }
+      result.links.filter(l => sameDomain(l, targetUrl) && !visited.has(l) && !toVisit.includes(l)).forEach(l => toVisit.push(l));
+      delete result.links; // Rapor link listesini kullanmıyor.
+    }
+
+    await writeReport(targetUrl, pageResults, reportDir);
+  } finally {
+    try { if (context) await context.close(); }
+    finally { await browser.close(); }
+  }
+}
+
+async function writeReport(targetUrl, pageResults, reportDir) {
   const allFindings = pageResults.flatMap(p => p.findings);
   const score = calcScore(allFindings);
   const grouped = { high: allFindings.filter(f => f.severity === 'high'), medium: allFindings.filter(f => f.severity === 'medium'), low: allFindings.filter(f => f.severity === 'low'), info: allFindings.filter(f => f.severity === 'info') };
   const builderHits = [...new Set(pageResults.flatMap(p => p.builderHits || []).map(b => b.name))];
-
-  pageResults.forEach((p, i) => {
-    if (p.screenshots?.desktop) fs.writeFileSync(path.join(reportDir, `p${i}_desktop.png`), p.screenshots.desktop);
-    if (p.screenshots?.mobile) fs.writeFileSync(path.join(reportDir, `p${i}_mobile.png`), p.screenshots.mobile);
-  });
 
   const scoreColor = score >= 80 ? '#2e9e4a' : score >= 50 ? '#e0a11a' : '#d64545';
   const sevLabel = { high: 'Yüksek', medium: 'Orta', low: 'Düşük', info: 'Bilgi' };

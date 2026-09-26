@@ -91,6 +91,44 @@ CLI kullanımı değişmez: `node scan.js <url> [--pages=5]`.
 Tek instance kullanın: tarama durumları bellekte, raporlar geçici yerel
 filesystem üzerinde tutulur. Yeniden başlatma/deploy sonrasında raporlar
 kaybolabilir. Supabase veya kalıcı depolama eklenmemiştir.
-`reports/` gitignore kapsamında kalır. Eşzamanlı taramalar ayrı Chromium
-süreçleri açtığından instance belleğini buna göre seçin.
+`reports/` gitignore kapsamında kalır. Aynı anda yalnızca bir web taraması çalışır.
+
+
+## 512 MB RAM için optimizasyonlar
+
+- Sunucu aynı anda yalnızca bir tarama kabul eder. Diğer istekler HTTP 429,
+  `Retry-After: 10` ve arayüzde gösterilen Türkçe mesaj alır; kuyruk oluşmaz.
+  Süreç kapanınca (başarı/hata) kilit açılır. Kilit tek Node sunucusu içindir;
+  ayrıca elle başlatılan CLI süreçlerini veya farklı instance'ları kapsamaz.
+- Chromium açıkça headless başlar. `--renderer-process-limit=1` renderer
+  süreç sayısını azaltmaya yönelik bir ipucudur; site izolasyonu nedeniyle
+  kesin sınır değildir. Arka plan ağ işleri ve uzantılar kapatılır.
+  `--disable-dev-shm-usage` dar /dev/shm alanı için uyumluluk ayarıdır,
+  toplam RAM sınırı değildir. Sayfa kaynakları/görseller engellenmez.
+- Desktop/mobile PNG'ler çekilir çekilmez rapor klasörüne yazılır.
+  Playwright screenshot sırasında geçici Buffer üretir, fakat bu Buffer
+  saklanmaz; `pageResults` yalnızca görüntünün başarı bilgisini tutar.
+- Görsel boyut kontrolü yalnızca `content-length` üzerinden yapılır.
+  Header yoksa boyut bulgusu atlanır; `response.body()` çağrılmaz.
+  Görsel tarayıcıda normal yüklenir ve screenshot'a dahil edilir.
+- Her sayfa ve açtığı popup'lar `finally` ile kapatılır. Cookie/oturum
+  davranışını koruyan ortak context tarama sonuna kadar kullanılır;
+  başarı veya hata durumunda context ve browser kapatılır.
+- Link, robots.txt ve sitemap yanıtları kullanıldıktan sonra
+  `APIResponse.dispose()` ile serbest bırakılır. Böylece yanıt gövdeleri
+  context ömrü boyunca birikmez:
+  https://playwright.dev/docs/api/class-apiresponse#api-response-dispose
+- AI/no-code eşleştirmesi renderer içinde yapılır; HTML'nin tamamı Node'a
+  taşınmaz. İşlenmiş link listeleri sonuç nesnelerinden çıkarılır.
+  HTML rapor şablonu, skor ve mevcut kontroller korunur.
+
+Kontrol: `node tests/memory-regression.js` (kurulu Chromium gerektirir).
+Testler 429/kilit açılması, hata durumunda kaynak kapatma, API yanıtlarını
+serbest bırakma, gövdesiz görsel kontrolü, erken screenshot yazımı,
+iki sayfalık web taraması, PNG sunumu ve CLI kullanımını kapsar.
+
+Render build/start ayarları değişmez. Bu iyileştirmeler birikmeyi azaltır;
+çok ağır tek bir site yine 512 MB sınırını aşabilir. Yerel testler Render
+Linux cgroup bellek ölçümünün yerini tutmaz; deploy sonrası RAM grafiği
+üzerinden doğrulayın.
 

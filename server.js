@@ -7,12 +7,18 @@ const path = require('node:path');
 const app = express();
 const reportsDir = path.join(__dirname, 'reports');
 const jobs = new Map();
+let activeScan = false;
 app.disable('x-powered-by');
 app.use(express.json({ limit: '4kb' }));
 app.use('/reports', express.static(reportsDir, { index: false, dotfiles: 'deny' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.post('/api/scans', (req, res) => {
+  if (activeScan) {
+    return res.status(429).set('Retry-After', '10').json({
+      error: 'Şu anda başka bir site taranıyor. Mevcut tarama bittikten sonra tekrar deneyin.',
+    });
+  }
   let url;
   try {
     const input = req.body?.url;
@@ -27,17 +33,29 @@ app.post('/api/scans', (req, res) => {
   const reportDir = path.join(reportsDir, id);
   const job = { status: 'running' };
   jobs.set(id, job);
-  const child = spawn(process.execPath, [path.join(__dirname, 'scan.js'), url.href], {
-    cwd: __dirname,
-    env: { ...process.env, SCAN_REPORT_DIR: reportDir },
-    stdio: ['ignore', 'inherit', 'inherit'],
-    windowsHide: true,
-  });
+  // Async işlemden önce kilitle; aynı anda ikinci süreç açılmaz.
+  activeScan = true;
+  let child;
+  try {
+    child = spawn(process.execPath, [path.join(__dirname, 'scan.js'), url.href], {
+      cwd: __dirname,
+      env: { ...process.env, SCAN_REPORT_DIR: reportDir },
+      stdio: ['ignore', 'inherit', 'inherit'],
+      windowsHide: true,
+    });
+  } catch (error) {
+    activeScan = false;
+    jobs.delete(id);
+    console.error('Tarama başlatılamadı:', error);
+    return res.status(500).json({ error: 'Tarama başlatılamadı. Lütfen yeniden deneyin.' });
+  }
   child.once('error', error => {
     console.error('Tarama başlatılamadı:', error);
     job.status = 'failed';
   });
   child.once('close', code => {
+    // error sonrası da close gelir; süreç kapanana kadar kilit korunur.
+    activeScan = false;
     if (code === 0 && fs.existsSync(path.join(reportDir, 'rapor.html'))) {
       job.status = 'completed';
       job.reportUrl = `/reports/${id}/rapor.html`;
