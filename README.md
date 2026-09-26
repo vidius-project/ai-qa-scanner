@@ -61,3 +61,36 @@ dosyasını değil) taşı/paylaş.
 - Birden fazla sayfayı (ana menüdeki linkleri) otomatik gezip taramak
 - Raporu PDF olarak da çıkarmak (müşteriye e-posta ekinde göndermek için)
 - Skor sistemi: bulgulara göre 0-100 "QA Sağlık Skoru" hesaplamak
+
+## Web uygulaması ve Render
+
+Yerelde `npm install`, `npx playwright install chromium`, ardından `npm start` çalıştırın.
+Arayüz: http://localhost:3000. Sunucu `process.env.PORT || 3000` portunu
+`0.0.0.0` üzerinde dinler.
+
+Render'da bir **Node Web Service** oluşturun:
+
+- **Build Command:** `npm ci && npx playwright install chromium`
+- **Start Command:** `npm start`
+- **Environment variable:** `PLAYWRIGHT_BROWSERS_PATH=0` (build ve runtime için)
+
+Bu değişken Chromium'u node_modules içindeki Playwright kurulumuna indirir;
+build ve çalışma aşamasında aynı tarayıcı dosyaları kullanılır.
+Playwright varsayılan headless Chromium ile çalışır. Özel Linux/Docker
+ortamında eksik sistem kütüphaneleri varsa, imajın build aşamasında root
+yetkisiyle `npx playwright install --with-deps chromium` kullanın.
+Kaynak: https://playwright.dev/docs/browsers
+
+Web taraması mevcut `scan.js` dosyasını ayrı Node sürecinde çalıştırır.
+`SCAN_REPORT_DIR` yalnızca bu sürece aktarılır; her istek
+`reports/<uuid>/rapor.html` ve aynı klasörde desktop/mobile PNG üretir.
+Arayüz "Site taranıyor..." durumunu gösterir, durumu sorgular ve hazır
+rapora yönlendirir. Hatalar arayüzde gösterilir; ayrıntılar sunucu logundadır.
+CLI kullanımı değişmez: `node scan.js <url> [--pages=5]`.
+
+Tek instance kullanın: tarama durumları bellekte, raporlar geçici yerel
+filesystem üzerinde tutulur. Yeniden başlatma/deploy sonrasında raporlar
+kaybolabilir. Supabase veya kalıcı depolama eklenmemiştir.
+`reports/` gitignore kapsamında kalır. Eşzamanlı taramalar ayrı Chromium
+süreçleri açtığından instance belleğini buna göre seçin.
+

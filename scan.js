@@ -251,7 +251,7 @@ async function writeReport(targetUrl, pageResults) {
   const outDir = path.join(__dirname, 'reports');
   const safeName = targetUrl.replace(/https?:\/\//, '').replace(/[^a-z0-9]/gi, '_').slice(0, 50);
   const stamp = Date.now();
-  const reportDir = path.join(outDir, `${safeName}_${stamp}`);
+  const reportDir = process.env.SCAN_REPORT_DIR || path.join(outDir, `${safeName}_${stamp}`);
   fs.mkdirSync(reportDir, { recursive: true });
 
   const allFindings = pageResults.flatMap(p => p.findings);

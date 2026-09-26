@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vidius QA Scanner</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #f4f6fa; color: #182238; font-family: system-ui, sans-serif; }
+    main { max-width: 640px; margin: 12vh auto; padding: 32px; background: white; border-radius: 16px; }
+    h1 { margin-top: 0; font-size: 28px; }
+    p { color: #586478; line-height: 1.6; }
+    label { display: block; margin: 24px 0 8px; font-weight: 600; }
+    .fields { display: flex; gap: 12px; }
+    input { min-width: 0; flex: 1; padding: 13px; border: 1px solid #aab5c6; border-radius: 8px; font: inherit; }
+    button { padding: 13px 24px; border: 0; border-radius: 8px; background: #354bdd; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    #status { min-height: 26px; }
+    @media (max-width: 480px) { main { margin: 24px 12px; padding: 24px; } .fields { flex-direction: column; } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Vidius QA Scanner</h1>
+    <p>Sitenizi masaüstü ve mobil görünümde kontrol edin, QA raporunuzu görüntüleyin. En fazla 5 sayfa taranır.</p>
+    <form id="scan-form">
+      <label for="url">Site URL'si</label>
+      <div class="fields">
+        <input id="url" name="url" type="url" placeholder="https://ornek.com" required>
+        <button type="submit">Tara</button>
+      </div>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
